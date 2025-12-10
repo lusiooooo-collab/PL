@@ -1,0 +1,277 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PL Prediction League</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body{background:#f3f4f6;font-family:Inter,system-ui,Arial}
+  </style>
+</head>
+<body>
+  <div id="root" class="p-6"></div>
+
+  <script type="text/babel">
+  const API_FOOTBALL_LEAGUE_ID = 135;
+  const API_FOOTBALL_SEASON = new Date().getFullYear();
+
+  function makeInitialsLogo(name, size = 64) {
+    const initials = (name || '').split(/\s+/).map(s=>s[0]).slice(0,2).join('').toUpperCase();
+    let hash = 0; for (let i=0;i<name.length;i++) hash = name.charCodeAt(i)+((hash<<5)-hash);
+    const hue = Math.abs(hash)%360;
+    const bg = `hsl(${hue} 65% 50%)`;
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}'>
+      <rect width='100%' height='100%' rx='10' fill='${bg}'/>
+      <text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' font-family='Arial' font-size='${size*0.42}' fill='white'>${initials}</text>
+    </svg>`;
+    return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  }
+
+  function App(){
+    const [apiKey, setApiKey] = React.useState('');
+    const [customUrl, setCustomUrl] = React.useState('');
+    const [fixtures, setFixtures] = React.useState([]);
+    const [teamsById, setTeamsById] = React.useState({});
+    const [predictions, setPredictions] = React.useState(()=> JSON.parse(localStorage.getItem('pl_preds')||'[]'));
+    const [results, setResults] = React.useState(()=> JSON.parse(localStorage.getItem('pl_results')||'[]'));
+    const [username, setUsername] = React.useState(localStorage.getItem('pl_user')||'');
+    const [note, setNote] = React.useState('Paste API key or fixtures URL and click Fetch.');
+
+    React.useEffect(()=>{ localStorage.setItem('pl_preds', JSON.stringify(predictions)); },[predictions]);
+    React.useEffect(()=>{ localStorage.setItem('pl_results', JSON.stringify(results)); },[results]);
+    React.useEffect(()=>{ localStorage.setItem('pl_user', username); },[username]);
+
+    function normalizeFromApiFootball(json) {
+      const fx = [];
+      const teams = {};
+      if (!json?.response) return {fixtures:[], teams:{}};
+      json.response.forEach(item=>{
+        const f = {
+          id: String(item.fixture?.id || item.id || `${item.teams?.home?.id}-${item.teams?.away?.id}-${item.fixture?.date||''}`),
+          home: item.teams?.home?.name || '',
+          away: item.teams?.away?.name || '',
+          date: (item.fixture?.date || '').slice(0,10) || '',
+        };
+        fx.push(f);
+        if (item.teams?.home) teams[item.teams.home.id||item.teams.home.name] = {name: item.teams.home.name, logo: item.teams.home.logo};
+        if (item.teams?.away) teams[item.teams.away.id||item.teams.away.name] = {name: item.teams.away.name, logo: item.teams.away.logo};
+      });
+      return {fixtures:fx, teams};
+    }
+
+    function normalizeGenericArray(items){
+      if(!Array.isArray(items)) return {fixtures:[], teams:{}};
+      const fx = [];
+      const teams = {};
+      items.forEach(m=>{
+        if(m.fixture && m.teams){
+          const f={ id:String(m.fixture.id||m.id||Math.random()), home:m.teams.home.name, away:m.teams.away.name, date:(m.fixture.date||'').slice(0,10)};
+          fx.push(f);
+          teams[m.teams.home.name]= {name:m.teams.home.name, logo:m.teams.home.logo||''};
+          teams[m.teams.away.name]= {name:m.teams.away.name, logo:m.teams.away.logo||''};
+        } else if(m.home && m.away){
+          fx.push({id:String(m.id||Math.random()), home:typeof m.home==='string'?m.home:m.home.name, away:typeof m.away==='string'?m.away:m.away.name, date:m.date||''});
+        }
+      });
+      return {fixtures:fx, teams};
+    }
+
+    async function fetchFixtures(){
+      setNote('Fetching...');
+      try {
+        if(customUrl){
+          const r = await fetch(customUrl);
+          const j = await r.json();
+          let items = j;
+          if(j.data) items = j.data;
+          if(j.response) items = j.response;
+          const {fixtures:fx, teams} = Array.isArray(items) ? normalizeGenericArray(items) : normalizeFromApiFootball(j);
+          if(fx.length===0){ setNote('No fixtures found in response.'); return; }
+          setFixtures(fx);
+          setTeamsById(prev => ({...prev, ...teams}));
+          setNote(`Loaded ${fx.length} fixtures from custom URL.`);
+          return;
+        }
+        if(apiKey){
+          const url = `https://v3.football.api-sports.io/fixtures?league=${API_FOOTBALL_LEAGUE_ID}&season=${API_FOOTBALL_SEASON}&next=50`;
+          const r = await fetch(url, { headers: { 'x-apisports-key': apiKey }});
+          if(!r.ok){ const text = await r.text(); setNote('API fetch failed: '+r.status+' '+text); return; }
+          const j = await r.json();
+          const {fixtures:fx, teams} = normalizeFromApiFootball(j);
+          setFixtures(fx);
+          setTeamsById(prev=> ({...prev,...teams}));
+          setNote(`Loaded ${fx.length} fixtures from API-Football.`);
+          return;
+        }
+        setNote('Provide API key or fixtures URL before fetching.');
+      } catch (e){
+        setNote('Fetch error: '+e.message);
+      }
+    }
+
+    function addPrediction(fixtureId, home, away){
+      if(!username) return alert('Enter your name at the top');
+      setPredictions(prev=>[...prev, {id:`p_${Date.now()}`, user:username, fixtureId, home: Number(home), away: Number(away)}]);
+    }
+    function setActualResult(fixtureId, home, away){
+      setResults(prev => {
+        const others = prev.filter(r=>r.fixtureId!==fixtureId);
+        return [...others, {fixtureId, home: Number(home), away: Number(away)}];
+      });
+    }
+    function scoreForPrediction(pred){
+      const res = results.find(r=>r.fixtureId===pred.fixtureId);
+      if(!res) return 0;
+      const predWinner = pred.home>pred.away? 'home' : pred.home<pred.away? 'away':'draw';
+      const actualWinner = res.home>res.away? 'home' : res.home<res.away? 'away':'draw';
+      if(predWinner===actualWinner && pred.home===res.home && pred.away===res.away) return 3;
+      if(predWinner===actualWinner) return 1;
+      return 0;
+    }
+
+    const leaderboard = React.useMemo(()=>{
+      const totals = {};
+      predictions.forEach(p=>{
+        const pts = scoreForPrediction(p);
+        if(!totals[p.user]) totals[p.user]={user:p.user, points:0, exact:0, winnerOnly:0};
+        totals[p.user].points += pts;
+        if(pts===3) totals[p.user].exact++;
+        if(pts===1) totals[p.user].winnerOnly++;
+      });
+      return Object.values(totals).sort((a,b)=> b.points - a.points || b.exact - a.exact);
+    },[predictions, results]);
+
+    return <div className="max-w-5xl mx-auto">
+      <h1 className="text-3xl font-bold text-center mb-6">PL — Prediction League (Serie A)</h1>
+
+      <div className="grid md:grid-cols-3 gap-4 mb-6">
+        <div className="md:col-span-2 space-y-3 p-4 bg-white rounded shadow">
+          <div>
+            <label className="block text-sm">Your name</label>
+            <input className="border p-2 w-full rounded" value={username} onChange={e=>setUsername(e.target.value)} placeholder="e.g. Alice"/>
+          </div>
+
+          <div className="flex gap-2">
+            <input className="border p-2 rounded flex-1" placeholder="Paste API-Football key" value={apiKey} onChange={e=>setApiKey(e.target.value)}/>
+            <input className="border p-2 rounded flex-1" placeholder="Or paste fixtures JSON URL" value={customUrl} onChange={e=>setCustomUrl(e.target.value)}/>
+            <button className="bg-blue-600 text-white px-4 rounded" onClick={fetchFixtures}>Fetch</button>
+          </div>
+
+          <div className="text-sm text-gray-600">{note}</div>
+        </div>
+
+        <div className="space-y-3 p-4 bg-white rounded shadow">
+          <h3 className="font-semibold">Leaderboard</h3>
+          {leaderboard.length===0? <div className="text-gray-500">No scores yet</div>: leaderboard.map(r=>(
+            <div key={r.user} className="flex justify-between border-b py-1">
+              <div>{r.user}</div>
+              <div>{r.points} pts</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="space-y-4">
+          {fixtures.length===0 && <div className="p-4 bg-white rounded shadow text-gray-600">No fixtures loaded. Use Fetch.</div>}
+          {fixtures.map(f=>{
+            const teamHome = Object.values(teamsById).find(t=> t.name===f.home) || {name:f.home, logo: makeInitialsLogo(f.home)};
+            const teamAway = Object.values(teamsById).find(t=> t.name===f.away) || {name:f.away, logo: makeInitialsLogo(f.away)};
+            return <div key={f.id} className="p-4 bg-white rounded shadow">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-3">
+                  <img src={teamHome.logo||makeInitialsLogo(f.home)} alt="" className="w-10 h-10 rounded" />
+                  <div><div className="font-bold">{f.home}</div></div>
+                </div>
+                <div className="text-sm text-gray-600">{f.date || ''}</div>
+                <div className="flex items-center gap-3">
+                  <div className="text-right"><div className="font-bold">{f.away}</div></div>
+                  <img src={teamAway.logo||makeInitialsLogo(f.away)} alt="" className="w-10 h-10 rounded" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-xs text-gray-600 mb-1">Your prediction</div>
+                  <div className="flex gap-2">
+                    <input type="number" placeholder="home" id={"p_h_"+f.id} className="border p-2 rounded flex-1" />
+                    <input type="number" placeholder="away" id={"p_a_"+f.id} className="border p-2 rounded flex-1" />
+                    <button className="bg-green-600 text-white px-3 rounded" onClick={()=>{
+                      const h = document.getElementById("p_h_"+f.id).value;
+                      const a = document.getElementById("p_a_"+f.id).value;
+                      if(h===''||a==='') return alert('Enter both scores');
+                      addPrediction(f.id, h, a);
+                    }}>Save</button>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-xs text-gray-600 mb-1">Enter result (admin)</div>
+                  <div className="flex gap-2">
+                    <input type="number" placeholder="home" id={"r_h_"+f.id} className="border p-2 rounded flex-1"/>
+                    <input type="number" placeholder="away" id={"r_a_"+f.id} className="border p-2 rounded flex-1"/>
+                    <button className="bg-indigo-600 text-white px-3 rounded" onClick={()=>{
+                      const h = document.getElementById("r_h_"+f.id).value;
+                      const a = document.getElementById("r_a_"+f.id).value;
+                      if(h===''||a==='') return alert('Enter both scores');
+                      setActualResult(f.id, Number(h), Number(a));
+                    }}>Set</button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3">
+                <div className="text-sm">Predictions for this match:</div>
+                <div className="space-y-1 mt-2">
+                  {predictions.filter(p=>p.fixtureId===f.id).length===0 && <div className="text-gray-500">No predictions yet</div>}
+                  {predictions.filter(p=>p.fixtureId===f.id).map(p=>(
+                    <div key={p.id} className="flex justify-between border p-2 rounded">
+                      <div><strong>{p.user}</strong> — {p.home} - {p.away}</div>
+                      <div>{scoreForPrediction(p)} pts</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>;
+          })}
+        </div>
+
+        <div>
+          <div className="p-4 bg-white rounded shadow space-y-3">
+            <h3 className="font-semibold">All Results</h3>
+            {results.length===0 && <div className="text-gray-500">No results entered</div>}
+            {results.map(r=>(
+              <div key={r.fixtureId} className="flex justify-between border-b py-1">
+                <div>{fixtures.find(f=>f.id===r.fixtureId)?.home || ''} {r.home} - {r.away} {fixtures.find(f=>f.id===r.fixtureId)?.away || ''}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="p-4 bg-white rounded shadow mt-4">
+            <h3 className="font-semibold">Controls</h3>
+            <div className="flex gap-2 mt-2">
+              <button className="bg-yellow-500 px-3 py-2 rounded" onClick={()=>{if(!confirm('Clear all predictions?')) return; setPredictions([]);}}>Clear Predictions</button>
+              <button className="bg-red-500 px-3 py-2 rounded" onClick={()=>{if(!confirm('Clear results?')) return; setResults([]);}}>Clear Results</button>
+              <button className="bg-gray-600 px-3 py-2 rounded text-white" onClick={()=>{
+                const data = {fixtures, predictions, results};
+                const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = 'pl-data.json'; a.click(); URL.revokeObjectURL(url);
+              }}>Export JSON</button>
+            </div>
+            <div className="text-xs text-gray-600 mt-2">Tip: paste a public fixtures URL or API-Football key and press Fetch.</div>
+          </div>
+        </div>
+      </div>
+    </div>;
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>
